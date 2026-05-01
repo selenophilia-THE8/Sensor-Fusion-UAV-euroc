@@ -204,13 +204,17 @@ def run_allan(input_csv, output_dir):
     return all_results, noise_params_for_ekf
 
 
-# ====================== 单独运行 ======================
 if __name__ == "__main__":
     if len(sys.argv) == 3:
         run_allan(sys.argv[1], sys.argv[2])
     else:
-        # 默认模式
-        run_allan(
-            input_csv=r"D:\同济\euroc_data\数据集\MH_01_easy\preprocessed.csv",
-            output_dir=r"D:\同济\euroc_data\数据集\MH_01_easy\allan_results"
-        )
+        PREPROCESS_DIR = r"D:\同济\euroc_data\数据集\预处理"
+        ALLAN_ROOT = r"D:\同济\euroc_data\数据集\allan"
+        
+        for folder in os.listdir(PREPROCESS_DIR):
+            seq_path = os.path.join(PREPROCESS_DIR, folder)
+            if os.path.isdir(seq_path):
+                input_csv = os.path.join(seq_path, f"{folder}_preprocessed.csv")
+                output_dir = os.path.join(ALLAN_ROOT, folder)
+                if os.path.exists(input_csv):
+                    run_allan(input_csv, output_dir)
