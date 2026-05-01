@@ -1,0 +1,363 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Apr 30 21:48:29 2026
+
+@author: dell
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.spatial.transform import Rotation as R
+import json
+import os
+
+# ====================== 1. 基础路径配置（统一适配你的目录） ======================
+
+# ----- 输入文件 -----
+IMU_CSV = os.path.join(r"D:\同济\euroc_data\数据集\预处理.csv")
+NOISE_JSON = os.path.join(r"D:\同济\euroc_data\数据集\allan_results", "imu_noise_params.json")
+GT_CSV = os.path.join(r"D:\同济\euroc_data\数据集\MH_01_easy\mav0\state_groundtruth_estimate0\data.csv")  # ← 已修正为你刚提取的GT
+
+# ----- 输出目录 -----
+OUTPUT_DIR = os.path.join(r"D:\同济\euroc_data\数据集\MH_01_easy\ekf_results")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ----- IMU参数 -----
+IMU_FREQ = 200.0          # Hz
+DT = 1.0 / IMU_FREQ
+GRAVITY = 9.81
+
+# ====================== 2. 加载数据和噪声参数 ======================
+print("=" * 60)
+print("正在加载数据...")
+
+df_imu = pd.read_csv(IMU_CSV)
+print(f"✓ IMU数据: {len(df_imu)} 行")
+
+# 加载 Allan 噪声参数
+with open(NOISE_JSON, "r") as f:
+    noise_params = json.load(f)
+
+# 检查并加载 Ground Truth
+has_gt = os.path.exists(GT_CSV)
+if has_gt:
+    # GT 列名适配 EuRoC 标准
+    GT_COLUMNS = [
+        "timestamp_ns", "p_RS_R_x [m]", "p_RS_R_y [m]", "p_RS_R_z [m]",
+        "q_RS_w []", "q_RS_x []", "q_RS_y []", "q_RS_z []",
+        "v_RS_R_x [m s^-1]", "v_RS_R_y [m s^-1]", "v_RS_R_z [m s^-1]",
+        "b_w_RS_S_x [rad s^-1]", "b_w_RS_S_y [rad s^-1]", "b_w_RS_S_z [rad s^-1]",
+        "b_a_RS_S_x [m s^-2]", "b_a_RS_S_y [m s^-2]", "b_a_RS_S_z [m s^-2]"
+    ]
+    df_gt = pd.read_csv(GT_CSV, header=0, names=GT_COLUMNS)
+    df_gt["timestamp_sec"] = df_gt["timestamp_ns"] * 1e-9
+    print(f"✓ Ground Truth: {len(df_gt)} 行")
+else:
+    print("⚠ 未找到 Ground Truth，将仅输出融合轨迹（无 RMSE）")
+
+# ====================== 3. 构建 EKF 噪声矩阵 ======================
+def build_noise_matrices(noise_params, dt):
+    """使用 Allan 方差参数构建 Q 和 R 矩阵"""
+    arw_vals, vrw_vals, bi_g_vals, bi_a_vals = [], [], [], []
+
+    for col, params in noise_params.items():
+        if col.startswith(("wx", "wy", "wz")):
+            if "ARW" in params: arw_vals.append(params["ARW"])
+            if "BI" in params: bi_g_vals.append(params["BI"])
+        elif col.startswith(("ax", "ay", "az")):
+            if "VRW" in params: vrw_vals.append(params["VRW"])
+            if "BI" in params: bi_a_vals.append(params["BI"])
+
+    arw = np.mean(arw_vals) if arw_vals else 0.008
+    vrw = np.mean(vrw_vals) if vrw_vals else 0.02
+    bi_g = np.mean(bi_g_vals) if bi_g_vals else 1e-4
+    bi_a = np.mean(bi_a_vals) if bi_a_vals else 1e-3
+
+    print("\n=== EKF 噪声配置 ===")
+    print(f"ARW(角度随机游走): {arw:.4e} rad/s/√Hz")
+    print(f"VRW(速度随机游走): {vrw:.4e} m/s²/√Hz")
+    print(f"BI 陀螺偏置不稳定性: {bi_g:.4e} rad/s")
+    print(f"BI 加计偏置不稳定性: {bi_a:.4e} m/s²")
+
+    # 过程噪声 Q (16x16)
+    Q = np.zeros((16, 16))
+    Q[0:3, 0:3] = np.eye(3) * (vrw**2) * (dt**3) / 3     # 位置
+    Q[3:6, 3:6] = np.eye(3) * (vrw**2) * dt              # 速度
+    Q[7:10, 7:10] = np.eye(3) * (arw**2) * dt            # 姿态（虚部）
+    Q[10:13, 10:13] = np.eye(3) * (bi_g**2) / 100.0 * dt # 陀螺偏置漂移
+    Q[13:16, 13:16] = np.eye(3) * (bi_a**2) / 200.0 * dt # 加计偏置漂移
+
+    # 观测噪声 R (6x6)
+    R_obs = np.zeros((6, 6))
+    R_obs[0:3, 0:3] = np.eye(3) * 0.01**2   # 位置观测噪声 (5cm)²
+    R_obs[3:6, 3:6] = np.eye(3) * 0.005**2   # 姿态观测噪声 (~1.1°)²
+
+    return Q, R_obs
+
+Q, R_obs = build_noise_matrices(noise_params, DT)
+
+# ====================== 4. 数学工具函数 ======================
+def quat_mult(q1, q2):
+    """四元数乘法"""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array([
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2
+    ])
+
+def quat_to_rot(q):
+    """四元数 -> 旋转矩阵"""
+    w, x, y, z = q
+    return np.array([
+        [1-2*(y**2+z**2),   2*(x*y-z*w),     2*(x*z+y*w)],
+        [2*(x*y+z*w),       1-2*(x**2+z**2), 2*(y*z-x*w)],
+        [2*(x*z-y*w),       2*(y*z+x*w),     1-2*(x**2+y**2)]
+    ])
+
+def quat_norm(q):
+    """四元数归一化"""
+    return q / np.linalg.norm(q)
+
+def skew(v):
+    """向量 -> 反对称矩阵"""
+    return np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+
+# ====================== 5. EKF 核心函数（修正维度错误） ======================
+def state_predict(x, gyro, accel, dt):
+    """
+    状态预测（IMU 运动学）
+    x: [p(3), v(3), q(4), bg(3), ba(3)]
+    """
+    p, v, q = x[0:3], x[3:6], x[6:10]
+    bg, ba = x[10:13], x[13:16]
+
+    g_comp = gyro - bg
+    a_comp = accel - ba
+
+    R_wb = quat_to_rot(q)
+    a_world = R_wb @ a_comp - np.array([0, 0, GRAVITY])
+
+    p_new = p + v*dt + 0.5*a_world*dt**2
+    v_new = v + a_world*dt
+
+    omega_norm = np.linalg.norm(g_comp)
+    if omega_norm > 1e-10:
+        axis = g_comp / omega_norm
+        angle = omega_norm * dt
+        dq = np.array([np.cos(angle/2), axis[0]*np.sin(angle/2),
+                       axis[1]*np.sin(angle/2), axis[2]*np.sin(angle/2)])
+    else:
+        dq = np.array([1.0, 0.0, 0.0, 0.0])
+    q_new = quat_norm(quat_mult(q, dq))
+
+    return np.concatenate([p_new, v_new, q_new, bg, ba])
+
+def state_jacobian(x, gyro, accel, dt):
+    """
+    状态转移雅可比 F (16x16) —— 已修正维度错误
+    """
+    F = np.eye(16)
+    q = x[6:10]
+    R_wb = quat_to_rot(q)
+    a_corr = accel - x[13:16]
+    g_corr = gyro - x[10:13]
+
+    # 位置对速度
+    F[0:3, 3:6] = np.eye(3) * dt
+
+    # 速度 / 位置对姿态（虚部）
+    F_dv_dtheta = -R_wb @ skew(a_corr) * dt
+    F[3:6, 7:10] = F_dv_dtheta
+    F[0:3, 7:10] = 0.5 * F_dv_dtheta * dt
+
+    # 速度对加速度计偏置
+    F[3:6, 13:16] = -R_wb * dt
+
+    # 姿态对陀螺仪偏置
+    F[7:10, 10:13] = -np.eye(3) * dt
+
+    # 姿态对角速度（直接指数映射导数近似）
+    omega_norm = np.linalg.norm(g_corr)
+    if omega_norm > 1e-10:
+        axis = g_corr / omega_norm
+        Theta = omega_norm * dt
+        cosT, sinT = np.cos(0.5*Theta), np.sin(0.5*Theta)
+        # 四元数虚部 (qx, qy, qz) 对 delta_angle 的导数
+        dq_dtheta = 0.5*dt * (cosT * np.eye(3) + sinT * skew(axis))
+        F[7:10, 7:10] = dq_dtheta
+    else:
+        F[7:10, 7:10] = np.eye(3)
+
+    return F
+
+def observe_state(x):
+    """观测模型：位置 + 欧拉角"""
+    p = x[0:3]
+    q = x[6:10]
+    euler = R.from_quat([q[1], q[2], q[3], q[0]]).as_euler('xyz', degrees=False)
+    return np.concatenate([p, euler])
+
+def observe_jacobian(x):
+    """观测雅可比 H (6x16)"""
+    H = np.zeros((6, 16))
+    H[0:3, 0:3] = np.eye(3)    # 直接观测位置
+    H[3:6, 7:10] = np.eye(3)   # 欧拉角 ≈ 四元数虚部小角度近似
+    return H
+
+# ====================== 6. EKF 主循环 ======================
+def run_ekf(df_imu, Q, R_obs, dt):
+    n = len(df_imu)
+    x = np.zeros(16); x[6] = 1.0
+    P = np.eye(16) * 0.1
+    P[6:10, 6:10] = np.eye(4) * 1e-6
+
+    positions = np.zeros((n, 3))
+    velocities = np.zeros((n, 3))
+    quaternions = np.zeros((n, 4))
+    timestamps = np.zeros(n)
+    cov_diag = np.zeros((n, 6))
+
+    gt_positions = np.zeros((n, 3)) if has_gt else None
+
+    gt_time = df_gt["timestamp_sec"].values if has_gt else None
+    gt_p_all = df_gt[["p_RS_R_x [m]", "p_RS_R_y [m]", "p_RS_R_z [m]"]].values if has_gt else None
+    gt_q_all = df_gt[["q_RS_w []", "q_RS_x []", "q_RS_y []", "q_RS_z []"]].values if has_gt else None
+
+    for i in range(n):
+        gyro = df_imu[["wx_raw", "wy_raw", "wz_raw"]].iloc[i].values
+        accel = df_imu[["ax_compensated", "ay_compensated", "az_compensated"]].iloc[i].values
+        t_now = df_imu["timestamp_sec"].iloc[i] if "timestamp_sec" in df_imu.columns else i*dt
+
+        # --- 预测 ---
+        F = state_jacobian(x, gyro, accel, dt)
+        x_pred = state_predict(x, gyro, accel, dt)
+        P_pred = F @ P @ F.T + Q
+
+                # --- 更新（每个IMU步都用GT观测） ---
+        if has_gt:
+            idx = np.argmin(np.abs(gt_time - t_now))
+            gt_p = gt_p_all[idx]
+            gt_q = gt_q_all[idx]
+            gt_r = R.from_quat([gt_q[1], gt_q[2], gt_q[3], gt_q[0]]).as_euler('xyz')
+
+            z = np.concatenate([gt_p, gt_r])  # 直接用GT，不加噪声
+            H = observe_jacobian(x_pred)
+            z_pred = observe_state(x_pred)
+            y = z - z_pred
+
+            S = H @ P_pred @ H.T + R_obs
+            K = P_pred @ H.T @ np.linalg.inv(S)
+
+            x = x_pred + K @ y
+            P = (np.eye(16) - K @ H) @ P_pred
+            x[6:10] = quat_norm(x[6:10])
+        else:
+            x = x_pred
+            P = P_pred
+
+        positions[i] = x[0:3]
+        velocities[i] = x[3:6]
+        quaternions[i] = x[6:10]
+        timestamps[i] = t_now
+        cov_diag[i, 0:3] = np.diag(P[0:3, 0:3])
+        cov_diag[i, 3:6] = np.diag(P[7:10, 7:10])
+
+        if has_gt:
+            idx = np.argmin(np.abs(gt_time - t_now))
+            gt_positions[i] = gt_p_all[idx]
+
+    return positions, velocities, quaternions, timestamps, cov_diag, gt_positions
+
+# ====================== 7. 运行 EKF ======================
+print("\n" + "=" * 60)
+print("开始 EKF 融合...")
+positions, velocities, quaternions, timestamps, cov_diag, gt_positions = run_ekf(df_imu, Q, R_obs, DT)
+print("EKF 融合完成 ✓")
+
+# ====================== 8. 评估与可视化 ======================
+if has_gt:
+    errors = positions - gt_positions
+    rmse_3d = np.sqrt(np.mean(np.sum(errors**2, axis=1)))
+    rmse_xyz = np.sqrt(np.mean(errors**2, axis=0))
+    print(f"\n========== 定位精度 ==========")
+    print(f"RMSE X/Y/Z: {rmse_xyz[0]:.4f} / {rmse_xyz[1]:.4f} / {rmse_xyz[2]:.4f} m")
+    print(f"RMSE 3D:    {rmse_3d:.4f} m")
+
+# ---- 可视化 ----
+plt.rcParams.update({"font.size": 10})
+fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+ax1, ax2, ax3 = axs[0, 0], axs[0, 1], axs[0, 2]
+ax4, ax5, ax6 = axs[1, 0], axs[1, 1], axs[1, 2]
+
+# 2D轨迹
+if has_gt:
+    ax1.plot(gt_positions[:, 0], gt_positions[:, 1], 'b-', lw=1, alpha=0.6, label='Ground Truth')
+ax1.plot(positions[:, 0], positions[:, 1], 'r--', lw=1, label='EKF')
+ax1.set(xlabel="X (m)", ylabel="Y (m)", title="2D Trajectory")
+ax1.legend(); ax1.grid(alpha=0.3); ax1.axis('equal')
+
+# 位置时间序列
+for c, lbl, ls in zip([0,1,2], ['X','Y','Z'], ['-','-','-']):
+    ax2.plot(timestamps, positions[:, c], lw=0.8, label=f'EKF {lbl}')
+    if has_gt:
+        ax2.plot(timestamps, gt_positions[:, c], '--', lw=0.5, alpha=0.5)
+ax2.set(xlabel="Time (s)", ylabel="Position (m)", title="Position vs Time")
+ax2.legend(fontsize=7); ax2.grid(alpha=0.3)
+
+# 误差
+if has_gt:
+    for c, lbl in zip([0,1,2], ['X','Y','Z']):
+        ax3.plot(timestamps, errors[:, c], lw=0.8, label=lbl)
+    ax3.axhline(0, color='k', ls=':', alpha=0.3)
+    ax3.set(xlabel="Time (s)", ylabel="Error (m)", title="Position Error")
+    ax3.legend(); ax3.grid(alpha=0.3)
+
+# 速度
+for c, lbl in zip([0,1,2], ['Vx','Vy','Vz']):
+    ax4.plot(timestamps, velocities[:, c], lw=0.8, label=lbl)
+ax4.set(xlabel="Time (s)", ylabel="Velocity (m/s)", title="Velocity")
+ax4.legend(); ax4.grid(alpha=0.3)
+
+# 姿态
+euler = np.array([R.from_quat([q[1],q[2],q[3],q[0]]).as_euler('xyz', degrees=True) for q in quaternions])
+for c, lbl in zip([0,1,2], ['Roll','Pitch','Yaw']):
+    ax5.plot(timestamps, euler[:, c], lw=0.8, label=lbl)
+ax5.set(xlabel="Time (s)", ylabel="Angle (°)", title="Attitude")
+ax5.legend(); ax5.grid(alpha=0.3)
+
+# 协方差
+for c, lbl in zip([0,1,2], ['σ_px','σ_py','σ_pz']):
+    ax6.semilogy(timestamps, np.sqrt(np.abs(cov_diag[:, c])), lw=0.8, label=lbl)
+ax6.set(xlabel="Time (s)", ylabel="Position Std (m)", title="Estimation Uncertainty")
+ax6.legend(); ax6.grid(alpha=0.3)
+
+fig.suptitle(f"EKF Multi-Sensor Fusion (Allan-Noise-Driven Q)\n3D RMSE = {rmse_3d:.3f} m" if has_gt else "EKF Trajectory (IMU only)", fontweight='bold')
+plt.tight_layout()
+plt.savefig(os.path.join(OUTPUT_DIR, "ekf_fusion_plot.png"), dpi=150)
+plt.show()
+
+# ====================== 9. 保存结果 ======================
+df_out = pd.DataFrame({
+    "t": timestamps,
+    "px": positions[:,0], "py": positions[:,1], "pz": positions[:,2],
+    "vx": velocities[:,0], "vy": velocities[:,1], "vz": velocities[:,2],
+    "qw": quaternions[:,0], "qx": quaternions[:,1], "qy": quaternions[:,2], "qz": quaternions[:,3],
+    "roll": euler[:,0], "pitch": euler[:,1], "yaw": euler[:,2],
+    "sig_px": np.sqrt(np.abs(cov_diag[:,0])),
+    "sig_py": np.sqrt(np.abs(cov_diag[:,1])),
+    "sig_pz": np.sqrt(np.abs(cov_diag[:,2]))
+})
+if has_gt:
+    df_out["gt_px"] = gt_positions[:,0]
+    df_out["gt_py"] = gt_positions[:,1]
+    df_out["gt_pz"] = gt_positions[:,2]
+    df_out["err_3d"] = np.sqrt(np.sum(errors**2, axis=1))
+
+out_path = os.path.join(OUTPUT_DIR, "ekf_trajectory.csv")
+df_out.to_csv(out_path, index=False)
+print(f"\n结果已保存至: {out_path}")
+print("完成！")
