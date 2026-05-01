@@ -23,19 +23,19 @@ def main():
 
     # 步骤1: 预处理
     print("\n[1/4] 数据预处理...")
-    os.system(f"python ../src/preprocessing.py")
+    os.system(f"python ../src/适宜euroc数据集的预处理.py")
 
     # 步骤2: Allan方差
     print("\n[2/4] Allan方差噪声分析...")
-    os.system(f"python ../src/allan_noise.py")
+    os.system(f"python ../src/适宜euroc数据集的Allan方差噪声建模.py")
 
     # 步骤3: EKF融合
     print("\n[3/4] EKF融合定位...")
-    os.system(f"python ../src/ekf_fusion.py")
+    os.system(f"python ../src/适宜euroc数据集的ekf融合估计.py")
 
     # 步骤4: Mahony（对照）
     print("\n[4/4] Mahony姿态解算（对照实验）...")
-    os.system(f"python ../src/mahony_ahrs.py")
+    os.system(f"python ../src/适宜euroc数据集的mahony滤波对比.py")
 
     print(f"\n========== 流水线完成 ==========")
 
