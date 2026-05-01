@@ -1,3 +1,9 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+import os
+
 # ====================== 1. 基础配置 ======================
 # 输入文件（你预处理后的数据）
 INPUT_CSV = r"D:\同济\euroc_data\数据集\预处理.csv"
