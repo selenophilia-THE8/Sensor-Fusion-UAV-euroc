@@ -1,0 +1,19 @@
+# EuRoC 数据集配置文件
+dataset:
+  name: "EuRoC MH_01_easy"
+  imu_freq: 200          # Hz
+  gravity: 9.81
+
+imu:
+  cols:
+    timestamp: "timestamp_ns"
+    gyro: ["w_RS_S_x [rad s^-1]", "w_RS_S_y [rad s^-1]", "w_RS_S_z [rad s^-1]"]
+    accel: ["a_RS_S_x [m s^-2]", "a_RS_S_y [m s^-2]", "a_RS_S_z [m s^-2]"]
+
+groundtruth:
+  cols:
+    position: ["p_RS_R_x [m]", "p_RS_R_y [m]", "p_RS_R_z [m]"]
+    quaternion: ["q_RS_w []", "q_RS_x []", "q_RS_y []", "q_RS_z []"]
+
+output:
+  rmse_target: 0.12      # 目标定位精度
