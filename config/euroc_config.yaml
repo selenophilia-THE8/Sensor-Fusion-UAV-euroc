@@ -1,19 +1,36 @@
-# EuRoC 数据集配置文件
-dataset:
-  name: "EuRoC MH_01_easy"
-  imu_freq: 200          # Hz
-  gravity: 9.81
+# EuRoC 全序列配置文件
 
+# 所有序列列表
+sequences:
+  - MH_01_easy
+  - MH_02_easy
+  - MH_03_medium
+  - MH_04_difficult
+  - MH_05_difficult
+  - V1_01_easy
+  - V1_02_medium
+  - V1_03_difficult
+  - V2_01_easy
+  - V2_02_medium
+  - V2_03_difficult
+
+# 数据集根目录（修改为你电脑上的实际路径）
+data_root: "D:/同济/euroc_data/数据集"
+
+# IMU参数
 imu:
+  freq: 200
+  gravity: 9.81
   cols:
     timestamp: "timestamp_ns"
     gyro: ["w_RS_S_x [rad s^-1]", "w_RS_S_y [rad s^-1]", "w_RS_S_z [rad s^-1]"]
     accel: ["a_RS_S_x [m s^-2]", "a_RS_S_y [m s^-2]", "a_RS_S_z [m s^-2]"]
 
+# Ground Truth 配置
 groundtruth:
   cols:
     position: ["p_RS_R_x [m]", "p_RS_R_y [m]", "p_RS_R_z [m]"]
     quaternion: ["q_RS_w []", "q_RS_x []", "q_RS_y []", "q_RS_z []"]
 
-output:
-  rmse_target: 0.12      # 目标定位精度
+# 输出根目录
+output_root: "D:/同济/euroc_data/数据集/results"
