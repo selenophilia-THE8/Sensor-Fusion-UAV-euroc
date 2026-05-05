@@ -1,6 +1,23 @@
+# ============================================================
 # EuRoC 全序列配置文件
+# 支持：纯 IMU / 双目惯性 / 单目惯性
+# 使用者只需修改 data_root 和 output_root 即可
+# ============================================================
 
-# 所有序列列表
+# ---------- 数据集根目录 ----------
+# 下载地址: https://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets
+# 使用时修改为你的实际解压路径
+data_root: "/path/to/euroc_dataset"
+
+# ---------- 输出根目录 ----------
+# 每个序列的结果将保存到 <output_root>/<序列名>/ 下
+output_root: "/path/to/output/results"
+
+# ---------- 传感器类型 ----------
+# 可选: imu_only / stereo_inertial / mono_inertial
+sensor_type: "stereo_inertial"
+
+# ---------- 所有序列列表 ----------
 sequences:
   - MH_01_easy
   - MH_02_easy
@@ -14,23 +31,128 @@ sequences:
   - V2_02_medium
   - V2_03_difficult
 
-# 数据集根目录（修改为你电脑上的实际路径）
-data_root: "D:/同济/euroc_data/数据集"
-
-# IMU参数
+# ============================================================
+# IMU 配置
+# ============================================================
 imu:
-  freq: 200
-  gravity: 9.81
+  freq: 200                  # Hz
+  gravity: 9.81              # m/s^2
+  
+  # IMU 数据文件相对于每个序列目录的路径
+  relative_path: "mav0/imu0/data.csv"
+  
+  # 列名映射（与 EuRoC csv 表头严格一致）
   cols:
-    timestamp: "timestamp_ns"
+    timestamp: "timestamp_ns"                                   # 纳秒时间戳
     gyro: ["w_RS_S_x [rad s^-1]", "w_RS_S_y [rad s^-1]", "w_RS_S_z [rad s^-1]"]
     accel: ["a_RS_S_x [m s^-2]", "a_RS_S_y [m s^-2]", "a_RS_S_z [m s^-2]"]
+  
+  # 噪声参数（典型值，可根据实际 IMU 型号调整）
+  noise:
+    accel_noise_density: 2.0e-3    # 加速度计噪声密度 [m/s^2 / sqrt(Hz)]
+    gyro_noise_density: 1.7e-4     # 陀螺仪噪声密度 [rad/s / sqrt(Hz)]
+    accel_random_walk: 2.0e-4      # 加速度计随机游走 [m/s^3 / sqrt(Hz)]
+    gyro_random_walk: 1.0e-5       # 陀螺仪随机游走 [rad/s^2 / sqrt(Hz)]
 
-# Ground Truth 配置
+# ============================================================
+# 相机配置（仅当 sensor_type 涉及相机时生效）
+# ============================================================
+camera:
+  freq: 20                   # Hz
+  
+  # 左目相机
+  left:
+    topic: "cam0"
+    relative_path: "mav0/cam0/data.csv"
+    image_dir: "mav0/cam0/data/"
+  
+  # 右目相机
+  right:
+    topic: "cam1"
+    relative_path: "mav0/cam1/data.csv"
+    image_dir: "mav0/cam1/data/"
+  
+  # 图像预处理
+  resolution: [752, 480]
+  undistorition: true        # 是否去畸变
+
+# ============================================================
+# 时间同步
+# ============================================================
+sync:
+  max_dt_ns: 5000000         # IMU 与相机最大允许时间差 (5ms = 5,000,000 ns)
+  method: "linear_interpolation"    # 时间对齐方式：linear_interpolation / nearest_neighbor
+
+# ============================================================
+# 外参（传感器之间的坐标变换）
+# 单位: [x, y, z] 米  [w, x, y, z] 四元数
+# ============================================================
+extrinsic:
+  # IMU 到 Body 坐标系 (通常为零，即 IMU=Body)
+  body_T_imu:
+    translation: [0.0, 0.0, 0.0]
+    quaternion: [1.0, 0.0, 0.0, 0.0]
+  
+  # Body 到 左目相机 (cam0) — 需从 EuRoC 参数文件获取
+  body_T_cam0:
+    translation: [0.0, 0.0, 0.0]
+    quaternion: [1.0, 0.0, 0.0, 0.0]
+  
+  # Body 到 右目相机 (cam1) — 需从 EuRoC 参数文件获取
+  body_T_cam1:
+    translation: [0.0, 0.0, 0.0]
+    quaternion: [1.0, 0.0, 0.0, 0.0]
+
+# ============================================================
+# Ground Truth 真值
+# ============================================================
 groundtruth:
+  # 相对于每个序列目录的路径
+  relative_path: "mav0/state_groundtruth_estimate0/data.csv"
+  
   cols:
+    timestamp: "timestamp_ns"
     position: ["p_RS_R_x [m]", "p_RS_R_y [m]", "p_RS_R_z [m]"]
     quaternion: ["q_RS_w []", "q_RS_x []", "q_RS_y []", "q_RS_z []"]
 
-# 输出根目录
-output_root: "D:/同济/euroc_data/数据集/results"
+# ============================================================
+# 输出配置
+# ============================================================
+output:
+  # 轨迹格式: tum / kitti / euroc
+  #   tum:   timestamp tx ty tz qx qy qz qw
+  #   kitti: 3x4 矩阵
+  #   euroc: timestamp, px, py, pz, qw, qx, qy, qz, ...
+  trajectory_format: "tum"
+  
+  # 保存选项
+  save_estimated_pose: true       # 保存估计位姿
+  save_covariance: false          # 保存协方差矩阵（文件较大）
+  save_groundtruth: true          # 同时保存用于对比的真值轨迹
+  save_alignment: true            # 保存估计轨迹与真值的对齐矩阵
+  
+  # 日志
+  verbose: true                   # 是否打印详细运行信息
+
+# ============================================================
+# 算法参数（示例，可按需扩展）
+# ============================================================
+algorithm:
+  # IMU 初始化
+  init:
+    stationary_duration_s: 2.0    # 静止初始化时长
+    accel_threshold: 0.1          # 加速度方差阈值（判断静止）
+    gyro_threshold: 0.01          # 陀螺仪方差阈值
+  
+  # 零速检测（纯 IMU 时有用）
+  zero_velocity_detection:
+    enabled: false
+    window_size: 10
+    accel_threshold: 0.05
+    gyro_threshold: 0.005
+
+  # 可视化
+  visualization:
+    enabled: true
+    save_plots: true
+    plot_dir: "plots"
